@@ -1,0 +1,127 @@
+###########################################
+# Spring Boot Application Configuration
+###########################################
+#
+# YAML vs Properties:
+# - application.yml (YAML format) - hierarchical, easier to read
+# - application.properties (flat key=value) - simpler but verbose
+#
+# Spring Boot reads this file on startup and populates configuration beans.
+#
+
+# ===================================
+# SERVER CONFIGURATION
+# ===================================
+# Embedded Tomcat server settings
+server:
+  port: 8081
+  # Why 8081? Port 8080 is used by Kafka UI
+  # Each microservice needs a unique port on localhost
+
+  servlet:
+    context-path: /
+    # Context path is the base URL: http://localhost:8081/
+    # Could be /order-service if you want: http://localhost:8081/order-service/api/orders
+
+# ===================================
+# APPLICATION METADATA
+# ===================================
+spring:
+  application:
+    name: order-service
+    # Used for:
+    # - Logging (identifies which service logged)
+    # - Service discovery (Eureka, Consul)
+    # - Distributed tracing (Sleuth, Zipkin)
+    # - Kafka consumer group naming
+
+# ===================================
+# KAFKA CONFIGURATION
+# ===================================
+# We'll add this when we integrate Kafka (Week 2)
+# For now, commenting out:
+#
+#  kafka:
+#    bootstrap-servers: localhost:9092
+#    # Kafka broker address - where KafkaTemplate sends messages
+#
+#    producer:
+#      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+#      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+#      # Serializers convert Java objects → bytes for Kafka
+#      # JsonSerializer uses Jackson to convert POJOs → JSON → bytes
+#
+#      acks: all
+#      # acks=all: Wait for all replicas to acknowledge (safest, slowest)
+#      # acks=1: Wait for leader acknowledgment (balanced)
+#      # acks=0: Fire-and-forget (fastest, least safe)
+#
+#      retries: 3
+#      # Retry failed sends up to 3 times before giving up
+#
+#    consumer:
+#      group-id: ${spring.application.name}
+#      # Consumer group - multiple instances share workload
+#      # Same group-id = load balancing
+#      # Different group-id = all receive the message
+#
+#      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+#      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+#      # Deserializers convert bytes → Java objects
+#
+#      properties:
+#        spring.json.trusted.packages: com.example.orderservice.dto
+#        # Security: Only deserialize classes from trusted packages
+#        # Prevents arbitrary code execution from malicious messages
+
+# ===================================
+# LOGGING CONFIGURATION
+# ===================================
+logging:
+  level:
+    com.example.orderservice: DEBUG
+    # Your application logs at DEBUG level (verbose for learning)
+
+    org.springframework.web: INFO
+    # Spring Web logs at INFO (less verbose)
+
+    org.apache.kafka: WARN
+    # Kafka logs only warnings/errors (too verbose otherwise)
+
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %logger{36} - %msg%n"
+    # Log format: timestamp - logger name - message
+    # %logger{36} truncates long package names to 36 chars
+
+# ===================================
+# ACTUATOR ENDPOINTS
+# ===================================
+# Health check and monitoring endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+        # Expose these endpoints:
+        # - /actuator/health - Is the service up? (used by Kubernetes)
+        # - /actuator/info - Application metadata
+        # - /actuator/metrics - Performance metrics
+
+  endpoint:
+    health:
+      show-details: always
+      # Show detailed health info (disk space, Kafka connectivity, etc.)
+
+# ===================================
+# CUSTOM APPLICATION PROPERTIES
+# ===================================
+# You can define your own properties here and inject them into beans
+# Example:
+# app:
+#   order:
+#     max-items: 100
+#     processing-timeout: 30s
+#
+# Then in Java:
+# @Value("${app.order.max-items}")
+# private int maxItems;
