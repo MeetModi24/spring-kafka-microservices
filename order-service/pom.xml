@@ -65,10 +65,15 @@
         - KafkaTemplate for producing messages
         - @KafkaListener for consuming messages
         - Kafka client libraries
+
+        VERSION OVERRIDE: Explicit version needed for Spring Boot 3.5.16
+        Parent spring-boot-starter-parent manages most versions, but spring-kafka 3.3.x
+        is required for compatibility with Spring Boot 3.5.x
         -->
         <dependency>
             <groupId>org.springframework.kafka</groupId>
             <artifactId>spring-kafka</artifactId>
+            <version>3.3.2</version>
         </dependency>
 
         <!--
