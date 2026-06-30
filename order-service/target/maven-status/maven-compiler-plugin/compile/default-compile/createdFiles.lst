@@ -2,9 +2,13 @@ com/example/orderservice/OrderServiceApplication.class
 com/example/orderservice/model/OrderStatus.class
 com/example/orderservice/dto/OrderItemResponse.class
 com/example/orderservice/dto/OrderItemRequest.class
+com/example/orderservice/dto/ErrorResponse.class
 com/example/orderservice/model/Order.class
 com/example/orderservice/dto/CreateOrderRequest.class
-com/example/orderservice/controller/OrderController.class
 com/example/orderservice/service/OrderService.class
-com/example/orderservice/model/OrderItem.class
 com/example/orderservice/dto/OrderResponse.class
+com/example/orderservice/exception/GlobalExceptionHandler.class
+com/example/orderservice/exception/InvalidOrderException.class
+com/example/orderservice/controller/OrderController.class
+com/example/orderservice/model/OrderItem.class
+com/example/orderservice/exception/OrderNotFoundException.class

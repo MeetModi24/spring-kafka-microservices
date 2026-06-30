@@ -9,6 +9,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Service;
 
 import com.example.orderservice.dto.CreateOrderRequest;
+import com.example.orderservice.exception.InvalidOrderException;
+import com.example.orderservice.exception.OrderNotFoundException;
 import com.example.orderservice.model.Order;
 import com.example.orderservice.model.OrderItem;
 
@@ -31,17 +33,19 @@ public class OrderService {
         Order order = new Order(request.getCustomerId(), orderItems);
         order.setOrderId(UUID.randomUUID().toString());
 
-        if(!order.isValid()){
-            throw new IllegalArgumentException("Order validation failed");
+        if (!order.isValid()) {
+            throw new InvalidOrderException("Order validation failed: " + 
+                "Check that all items have valid productId, quantity > 0, and price > 0");
         }
+
         orderStore.put(order.getOrderId(), order);
         return order;
     }
     
     public Order getOrderById(String Id){
         Order order = orderStore.get(Id);
-        if(order == null){
-            throw new IllegalArgumentException("Id not found"); 
+        if (order == null) {
+            throw new OrderNotFoundException(Id);
         }
         return order;
     }
