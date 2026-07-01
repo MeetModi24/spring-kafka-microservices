@@ -5,10 +5,12 @@
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/dto/OrderItemRequest.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/dto/OrderItemResponse.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/dto/OrderResponse.java
+/Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/event/OrderCreatedEvent.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/exception/GlobalExceptionHandler.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/exception/InvalidOrderException.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/exception/OrderNotFoundException.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/model/Order.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/model/OrderItem.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/model/OrderStatus.java
+/Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/service/OrderEventProducer.java
 /Users/mhiteshkumar/spring-kafka-microservices/order-service/src/main/java/com/example/orderservice/service/OrderService.java

@@ -38,41 +38,48 @@ spring:
 # ===================================
 # KAFKA CONFIGURATION
 # ===================================
-# We'll add this when we integrate Kafka (Week 2)
-# For now, commenting out:
-#
-#  kafka:
-#    bootstrap-servers: localhost:9092
-#    # Kafka broker address - where KafkaTemplate sends messages
-#
-#    producer:
-#      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-#      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-#      # Serializers convert Java objects → bytes for Kafka
-#      # JsonSerializer uses Jackson to convert POJOs → JSON → bytes
-#
-#      acks: all
-#      # acks=all: Wait for all replicas to acknowledge (safest, slowest)
-#      # acks=1: Wait for leader acknowledgment (balanced)
-#      # acks=0: Fire-and-forget (fastest, least safe)
-#
-#      retries: 3
-#      # Retry failed sends up to 3 times before giving up
-#
-#    consumer:
-#      group-id: ${spring.application.name}
-#      # Consumer group - multiple instances share workload
-#      # Same group-id = load balancing
-#      # Different group-id = all receive the message
-#
-#      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-#      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-#      # Deserializers convert bytes → Java objects
-#
-#      properties:
-#        '[spring.json.trusted.packages]': com.example.orderservice.dto
-#        # Security: Only deserialize classes from trusted packages
-#        # Prevents arbitrary code execution from malicious messages
+  kafka:
+    bootstrap-servers: localhost:9092
+    # Kafka broker address - where KafkaTemplate sends messages
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # Serializers convert Java objects → bytes for Kafka
+      # JsonSerializer uses Jackson to convert POJOs → JSON → bytes
+
+      acks: all
+      # acks=all: Wait for all replicas to acknowledge (safest, slowest)
+      # acks=1: Wait for leader acknowledgment (balanced)
+      # acks=0: Fire-and-forget (fastest, least safe)
+
+      retries: 3
+      # Retry failed sends up to 3 times before giving up
+
+      properties:
+        enable.idempotence: true
+        # Idempotence ensures exactly-once delivery within a partition
+        # Prevents duplicate messages on retry
+
+        spring.json.type.mapping: orderCreated:com.example.orderservice.event.OrderCreatedEvent
+        # Type mapping for JsonSerializer deserialization
+        # Maps event type name to Java class
+
+    # Consumer configuration (for Phase 3)
+    consumer:
+      group-id: ${spring.application.name}
+      # Consumer group - multiple instances share workload
+      # Same group-id = load balancing
+      # Different group-id = all receive the message
+
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      # Deserializers convert bytes → Java objects
+
+      properties:
+        '[spring.json.trusted.packages]': com.example.orderservice.event
+        # Security: Only deserialize classes from trusted packages
+        # Prevents arbitrary code execution from malicious messages
 
 # ===================================
 # LOGGING CONFIGURATION
@@ -85,8 +92,11 @@ logging:
     org.springframework.web: INFO
     # Spring Web logs at INFO (less verbose)
 
-    org.apache.kafka: WARN
-    # Kafka logs only warnings/errors (too verbose otherwise)
+    org.springframework.kafka: DEBUG
+    # Kafka logs at DEBUG to see connection and message activity
+
+    org.apache.kafka.clients: INFO
+    # Kafka client logs at INFO (detailed producer/consumer activity)
 
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} - %logger{36} - %msg%n"
