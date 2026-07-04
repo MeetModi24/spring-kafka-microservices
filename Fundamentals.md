@@ -819,3 +819,4 @@ Spring Boot startup sequence and request processing.
   - mvn package - Creates target/order-service-1.0.0-SNAPSHOT.jar
   - mvn spring-boot:run - Runs the application (Spring Boot plugin goal)
   - mvn install - Installs JAR to local Maven repo (~/.m2/repository)
+
