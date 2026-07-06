@@ -46,5 +46,10 @@ public enum OrderStatus {
     /**
      * Order cancelled (by customer or system)
      */
-    CANCELLED
+    CANCELLED,
+
+    /**
+     * Order rejected (SAGA decision - payment or stock failed)
+     */
+    REJECTED
 }
