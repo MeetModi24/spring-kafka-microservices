@@ -49,6 +49,13 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- Jackson for JSON serialization/deserialization -->
+        <!-- Required for Kafka JsonDeserializer even without spring-boot-starter-web -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
         <!-- NO spring-boot-starter-web - This is a Kafka-only service -->
     </dependencies>
 
