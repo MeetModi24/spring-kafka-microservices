@@ -42,6 +42,48 @@ We implement a **choreography-based SAGA with implicit orchestration**: order-se
 
 ---
 
+## 📐 Topic Architecture: 2 Topics (Not 3!)
+
+**IMPORTANT:** This implementation uses **2 Kafka topics**, matching the reference repository pattern.
+
+### Topic Strategy
+
+| Topic | Events | Publishers | Consumers |
+|-------|--------|-----------|-----------|
+| **order-events** | OrderCreatedEvent (status=NEW)<br>FinalDecisionEvent (status=CONFIRMED/ROLLBACK) | order-service | payment-service (2 consumer groups) |
+| **payment-events** | PaymentProcessedEvent (status=ACCEPT/REJECT) | payment-service | order-service |
+
+### Why 2 Topics Instead of 3?
+
+**Common Mistake:** Creating separate topics like:
+- `order-events` (initial orders)
+- `payment-events` (payment responses)
+- `order-decision-events` (final decisions) ❌ NOT NEEDED
+
+**Reference Repository Pattern:** 
+- `orders` topic carries BOTH OrderCreatedEvent AND FinalDecisionEvent
+- Consumers discriminate by event status field
+- payment-service has TWO consumer groups on the same topic
+
+### Consumer Group Strategy
+
+**payment-service has TWO @KafkaListener methods on "order-events":**
+
+1. **Consumer Group: "payment-service-group"**
+   - Filters: `status == NEW`
+   - Action: Reserve funds, publish PaymentProcessedEvent
+
+2. **Consumer Group: "payment-decision-group"**
+   - Filters: `status == CONFIRMED || status == ROLLBACK`
+   - Action: Confirm or rollback funds
+
+**Why Different Consumer Groups?**
+- Ensures both listeners receive the same messages
+- Each group maintains its own offset
+- Parallel processing of different event types on same topic
+
+---
+
 ## 🏗️ Architecture: Complete Event Flow
 
 ```
@@ -98,12 +140,12 @@ Step 3: Order Orchestration Decision (NEW - Part A)
     │ 4. Update orderStateStore
     │ 5. Publish FinalDecisionEvent
     │
-    └──► Kafka topic: "order-decision-events"
+    └──► Kafka topic: "order-events"  ← SAME TOPIC as step 1!
 
 
 Step 4: Payment Commit or Rollback (NEW - Part B)
 ──────────────────────────────────────────────────
-  Kafka topic: "order-decision-events"
+  Kafka topic: "order-events"  ← SAME TOPIC, different consumer group
     │
     │ FinalDecisionEvent
     ▼
@@ -489,7 +531,7 @@ import java.util.Set;
 @Slf4j
 public class OrderOrchestrationService {
     
-    private static final String DECISION_TOPIC = "order-decision-events";
+    private static final String DECISION_TOPIC = "order-events";  // Same topic as OrderCreatedEvent
     
     private final OrderStateStore orderStateStore;
     private final KafkaTemplate<String, FinalDecisionEvent> kafkaTemplate;
@@ -770,8 +812,8 @@ public class DecisionEventConsumer {
      * @param event FinalDecisionEvent from order-service
      */
     @KafkaListener(
-        topics = "order-decision-events",
-        groupId = "payment-service-group",
+        topics = "order-events",
+        groupId = "payment-decision-group",  // Different group from payment-service-group
         containerFactory = "kafkaListenerContainerFactory"
     )
     public void consumeDecisionEvent(FinalDecisionEvent event) {
@@ -1010,10 +1052,11 @@ SELECT * FROM customers WHERE customer_id = 'CUST-1';
 ```bash
 open http://localhost:8080
 
-# Topics to check:
-# 1. order-events → OrderCreatedEvent
+# Topics to check (only 2 topics!):
+# 1. order-events → BOTH OrderCreatedEvent AND FinalDecisionEvent
+#    - First message: status=NEW (OrderCreatedEvent)
+#    - Second message: status=CONFIRMED (FinalDecisionEvent)
 # 2. payment-events → PaymentProcessedEvent (status=ACCEPT)
-# 3. order-decision-events → FinalDecisionEvent (status=CONFIRMED)
 ```
 
 ---

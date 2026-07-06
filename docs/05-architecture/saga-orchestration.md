@@ -170,8 +170,8 @@ HAPPY PATH: Payment Accepted
    │                     │                   │                   │
    │                     │ FinalDecisionEvent│                   │
    │                     ├──────────────────>│                   │
-   │                     │ (order-decision-  │                   │
-   │                     │  events)          │                   │
+   │                     │ (order-events)    │                   │
+   │                     │  SAME TOPIC!      │                   │
    │                     │ status=CONFIRMED  │                   │
    │                     │                   │                   │
    │                     │                   │ FinalDecisionEvent│
@@ -537,7 +537,7 @@ public void checkTimedOutOrders() {
                 .reason("Timeout: No response after 5 minutes")
                 .build();
             
-            kafkaTemplate.send("order-decision-events", decision);
+            kafkaTemplate.send("order-events", decision);  // Same topic as OrderCreatedEvent
         });
 }
 ```

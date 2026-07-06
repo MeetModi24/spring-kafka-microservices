@@ -20,7 +20,10 @@ spring:
       # JsonDeserializer properties
       properties:
         spring.json.trusted.packages: "*"
-        spring.json.type.mapping: orderCreated:com.example.paymentservice.event.OrderCreatedEvent
+        # Type mapping for polymorphic deserialization
+        # Maps type header → Java class
+        # Supports multiple event types on same topic
+        spring.json.type.mapping: orderCreated:com.example.paymentservice.event.OrderCreatedEvent,finalDecision:com.example.paymentservice.event.FinalDecisionEvent
     
     # Producer Configuration (for response events)
     producer:

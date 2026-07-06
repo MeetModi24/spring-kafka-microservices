@@ -126,10 +126,11 @@
 - Avoids complex orchestrator logic
 
 ### 4. Event Topics
-**Topics:**
-- `order-events` (OrderCreatedEvent)
-- `payment-events` (PaymentProcessedEvent)
-- `order-decision-events` (FinalDecisionEvent) ← NEW
+**Topics (Only 2!):**
+- `order-events` - BOTH OrderCreatedEvent AND FinalDecisionEvent ← SAME TOPIC!
+- `payment-events` - PaymentProcessedEvent
+
+**Why 2 Topics?** Matches reference repository pattern. payment-service has 2 consumer groups on "order-events".
 
 **Partitioning:** 3 partitions per topic (Phase 4), increase to 10+ in production
 
@@ -137,14 +138,17 @@
 
 ## Architecture Highlights
 
-### Complete SAGA Flow (3 Events)
+### Complete SAGA Flow (3 Events, 2 Topics)
 
 ```
 1. OrderCreatedEvent (order-service → payment-service)
+   Topic: order-events
    ↓
 2. PaymentProcessedEvent (payment-service → order-service)
+   Topic: payment-events
    ↓
 3. FinalDecisionEvent (order-service → payment-service)
+   Topic: order-events ← SAME as #1!
 ```
 
 ### State Transitions
@@ -166,9 +170,9 @@ order-service:
   - State Store (track orders) ← NEW
 
 payment-service:
-  - Kafka Consumer #1 (consume order-events)
+  - Kafka Consumer #1 (consume order-events, group: payment-service-group)
   - Kafka Producer (publish payment-events)
-  - Kafka Consumer #2 (consume decision-events) ← NEW
+  - Kafka Consumer #2 (consume order-events, group: payment-decision-group) ← NEW, SAME TOPIC!
   - SAGA Logic (reserve/confirm/rollback) ← UPDATED
 ```
 
@@ -183,7 +187,7 @@ Phase 4 is complete when:
 3. ✅ Final decision triggers commit/rollback
 4. ✅ Customer balance correctly updated (reserve → confirm)
 5. ✅ Idempotency prevents duplicate processing
-6. ✅ All 3 event types visible in Kafka UI
+6. ✅ Only 2 topics in Kafka UI (order-events shows BOTH event types)
 7. ✅ Order status queryable via REST API
 8. ✅ No exceptions in logs (except expected validation errors)
 
