@@ -38,6 +38,29 @@ Order → Payment + Stock → Stream Join → Decision (3-way matrix)
 
 ---
 
+## Architecture Note: Multi-Item vs Single-Item Pattern
+
+**This implementation handles multi-item orders** (realistic e-commerce scenario):
+- Orders can have multiple products with different quantities
+- Stock service reserves ALL items atomically (all or nothing)
+- Payment service charges total amount (sum of all items)
+- Join operates at ORDER level (not per-item)
+
+**Reference repo uses single-item pattern** (simplified for Kafka Streams demo):
+- One product per order (not a list)
+- Simpler SAGA logic (no aggregation needed)
+- Focus on Kafka Streams features, not business complexity
+
+**Why we chose multi-item:**
+- ✅ More realistic (real orders have multiple items)
+- ✅ Shows atomic transaction handling (partial failure → full rollback)
+- ✅ Better learning (handling aggregation in distributed systems)
+- ✅ Builds on Phase 4 (already has List<OrderItem> structure)
+
+See `PHASE-5-ARCHITECTURE-COMPARISON.md` for detailed comparison with reference repo.
+
+---
+
 ## Part 1: Add Stock Service (Days 1-3)
 
 ### 1.1 Create stock-service Module
@@ -244,6 +267,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import java.util.List;
 
 @Data
 @NoArgsConstructor
@@ -251,14 +275,29 @@ import lombok.NoArgsConstructor;
 @Builder
 public class StockProcessedEvent {
     private String orderId;
-    private String productId;
-    private int quantity;
+    private String customerId;
+    private List<StockItemResult> items;  // Results for ALL items
     private StockStatus status;
     private String reason;  // Rejection reason (if status = REJECT)
     
     public enum StockStatus {
-        ACCEPT,   // Stock reserved successfully
-        REJECT    // Insufficient stock
+        ACCEPT,   // All items reserved successfully
+        REJECT    // At least one item unavailable
+    }
+    
+    /**
+     * Inner class for individual item results.
+     * Useful for tracking which specific items failed.
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Builder
+    public static class StockItemResult {
+        private String productId;
+        private String productName;
+        private int quantity;
+        private boolean available;  // Was this specific item available?
     }
 }
 ```
@@ -270,7 +309,9 @@ public class StockProcessedEvent {
 ```java
 package com.example.stockservice.service;
 
+import com.example.stockservice.event.OrderCreatedEvent;
 import com.example.stockservice.event.StockProcessedEvent;
+import com.example.stockservice.event.StockProcessedEvent.StockItemResult;
 import com.example.stockservice.event.StockProcessedEvent.StockStatus;
 import com.example.stockservice.model.Product;
 import com.example.stockservice.repository.ProductRepository;
@@ -279,7 +320,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
@@ -293,119 +334,219 @@ public class StockService {
     private final Set<String> processedReservations = ConcurrentHashMap.newKeySet();
     private final Set<String> processedDecisions = ConcurrentHashMap.newKeySet();
     
+    // Cache last response for idempotency
+    private final Map<String, StockProcessedEvent> responseCache = new ConcurrentHashMap<>();
+    
     /**
-     * Reserve stock for an order (Phase 1 of SAGA).
+     * Reserve stock for ALL items in an order (Phase 1 of SAGA).
+     * 
+     * ATOMIC OPERATION:
+     * - Either ALL items are reserved, or NONE are reserved
+     * - If any item fails, rollback all previously reserved items in this order
+     * 
+     * This ensures consistency: we never end up with partial reservations.
      */
     @Transactional
-    public StockProcessedEvent processOrderStock(String orderId, String productId, int quantity) {
+    public StockProcessedEvent processOrderStock(OrderCreatedEvent event) {
+        String orderId = event.getOrderId();
+        
         // Idempotency check
         if (processedReservations.contains(orderId)) {
             log.warn("Duplicate stock reservation request for order: {}", orderId);
-            return buildLastResponse(orderId);
+            return responseCache.getOrDefault(orderId, buildDefaultResponse(orderId));
         }
         
-        log.info("Processing stock for order: {} | Product: {} | Quantity: {}", 
-                 orderId, productId, quantity);
+        log.info("Processing stock for order: {} | Items: {}", orderId, event.getItems().size());
         
-        Product product = productRepository.findById(productId).orElse(null);
+        List<StockItemResult> itemResults = new ArrayList<>();
+        List<Product> reservedProducts = new ArrayList<>();  // Track for rollback
+        boolean allAvailable = true;
+        StringBuilder failureReason = new StringBuilder();
         
-        if (product == null) {
-            log.warn("Product not found: {}", productId);
-            processedReservations.add(orderId);
-            return StockProcessedEvent.builder()
-                .orderId(orderId)
-                .productId(productId)
-                .quantity(quantity)
-                .status(StockStatus.REJECT)
-                .reason("Product not found")
-                .build();
+        // Try to reserve ALL items
+        for (OrderCreatedEvent.OrderItemEvent item : event.getItems()) {
+            Product product = productRepository.findById(item.getProductId()).orElse(null);
+            
+            if (product == null) {
+                log.warn("Product not found: {}", item.getProductId());
+                allAvailable = false;
+                failureReason.append("Product ").append(item.getProductId()).append(" not found; ");
+                
+                itemResults.add(StockItemResult.builder()
+                    .productId(item.getProductId())
+                    .productName(item.getProductName())
+                    .quantity(item.getQuantity())
+                    .available(false)
+                    .build());
+                break;  // Stop processing, will rollback
+            }
+            
+            log.info("Product {} | Available: {} | Reserved: {} | Required: {}", 
+                     item.getProductId(), product.getAvailableItems(), 
+                     product.getReservedItems(), item.getQuantity());
+            
+            boolean reserved = product.reserve(item.getQuantity());
+            
+            if (!reserved) {
+                log.warn("Insufficient stock for product: {} | Available: {} | Required: {}", 
+                         item.getProductId(), product.getAvailableItems(), item.getQuantity());
+                allAvailable = false;
+                failureReason.append("Product ").append(item.getProductId())
+                             .append(" insufficient (available: ").append(product.getAvailableItems())
+                             .append(", required: ").append(item.getQuantity()).append("); ");
+                
+                itemResults.add(StockItemResult.builder()
+                    .productId(item.getProductId())
+                    .productName(item.getProductName())
+                    .quantity(item.getQuantity())
+                    .available(false)
+                    .build());
+                break;  // Stop processing, will rollback
+            }
+            
+            // Successfully reserved this item
+            reservedProducts.add(product);
+            itemResults.add(StockItemResult.builder()
+                .productId(item.getProductId())
+                .productName(item.getProductName())
+                .quantity(item.getQuantity())
+                .available(true)
+                .build());
+            
+            log.info("Reserved {} units of product {}", item.getQuantity(), item.getProductId());
         }
         
-        log.info("Product {} | Available: {} | Reserved: {} | Required: {}", 
-                 productId, product.getAvailableItems(), product.getReservedItems(), quantity);
+        StockProcessedEvent response;
         
-        boolean reserved = product.reserve(quantity);
-        
-        if (reserved) {
-            productRepository.save(product);
+        if (allAvailable) {
+            // All items reserved successfully - commit to database
+            productRepository.saveAll(reservedProducts);
+            productRepository.flush();
             processedReservations.add(orderId);
             
-            log.info("Stock RESERVED for order: {} | Product: {} | Quantity: {} | Remaining: {}", 
-                     orderId, productId, quantity, product.getAvailableItems());
+            log.info("Stock RESERVED for order: {} | All {} items available", 
+                     orderId, event.getItems().size());
             
-            return StockProcessedEvent.builder()
+            response = StockProcessedEvent.builder()
                 .orderId(orderId)
-                .productId(productId)
-                .quantity(quantity)
+                .customerId(event.getCustomerId())
+                .items(itemResults)
                 .status(StockStatus.ACCEPT)
                 .build();
+            
         } else {
+            // At least one item failed - rollback ALL reserved items
+            log.warn("Stock REJECTED for order: {} | Reason: {}", orderId, failureReason);
+            
+            for (Product product : reservedProducts) {
+                // Find the quantity we reserved for this product
+                int quantityToRollback = event.getItems().stream()
+                    .filter(item -> item.getProductId().equals(product.getProductId()))
+                    .findFirst()
+                    .map(OrderCreatedEvent.OrderItemEvent::getQuantity)
+                    .orElse(0);
+                
+                product.rollback(quantityToRollback);
+                log.info("Rolled back {} units of product {}", quantityToRollback, product.getProductId());
+            }
+            
+            productRepository.saveAll(reservedProducts);
+            productRepository.flush();
             processedReservations.add(orderId);
             
-            log.warn("Stock REJECTED for order: {} | Insufficient stock | Available: {} | Required: {}", 
-                     orderId, product.getAvailableItems(), quantity);
-            
-            return StockProcessedEvent.builder()
+            response = StockProcessedEvent.builder()
                 .orderId(orderId)
-                .productId(productId)
-                .quantity(quantity)
+                .customerId(event.getCustomerId())
+                .items(itemResults)
                 .status(StockStatus.REJECT)
-                .reason("Insufficient stock. Available: " + product.getAvailableItems())
+                .reason(failureReason.toString().trim())
                 .build();
         }
+        
+        // Cache response for idempotency
+        responseCache.put(orderId, response);
+        return response;
     }
     
     /**
-     * Confirm stock reservation (Phase 2 of SAGA - CONFIRMED path).
+     * Confirm stock reservation for ALL items (Phase 2 of SAGA - CONFIRMED path).
+     * Moves items from reserved to permanently deducted.
      */
     @Transactional
-    public void handleConfirm(String orderId, String productId, int quantity) {
+    public void handleConfirm(OrderCreatedEvent event) {
+        String orderId = event.getOrderId();
+        
         if (processedDecisions.contains(orderId)) {
             log.warn("Duplicate confirm for order: {}", orderId);
             return;
         }
         
-        log.info("Received CONFIRM decision for order: {}", orderId);
+        log.info("Received CONFIRM decision for order: {} | Items: {}", 
+                 orderId, event.getItems().size());
         
-        Product product = productRepository.findById(productId).orElse(null);
-        if (product != null) {
-            product.confirm(quantity);
-            productRepository.save(product);
-            processedDecisions.add(orderId);
-            
-            log.info("Stock CONFIRMED for order: {} | Product: {} | Deducted: {} | Reserved now: {}", 
-                     orderId, productId, quantity, product.getReservedItems());
+        List<Product> productsToUpdate = new ArrayList<>();
+        
+        for (OrderCreatedEvent.OrderItemEvent item : event.getItems()) {
+            Product product = productRepository.findById(item.getProductId()).orElse(null);
+            if (product != null) {
+                product.confirm(item.getQuantity());
+                productsToUpdate.add(product);
+                
+                log.info("Confirmed {} units of product {} | Reserved now: {}", 
+                         item.getQuantity(), item.getProductId(), product.getReservedItems());
+            }
         }
+        
+        productRepository.saveAll(productsToUpdate);
+        productRepository.flush();
+        processedDecisions.add(orderId);
+        
+        log.info("Stock CONFIRMED for order: {} | All {} items deducted", 
+                 orderId, event.getItems().size());
     }
     
     /**
-     * Rollback stock reservation (Phase 2 of SAGA - REJECTED/ROLLBACK path).
+     * Rollback stock reservation for ALL items (Phase 2 of SAGA - REJECTED/ROLLBACK path).
+     * Returns items from reserved back to available pool.
      */
     @Transactional
-    public void handleRollback(String orderId, String productId, int quantity) {
+    public void handleRollback(OrderCreatedEvent event) {
+        String orderId = event.getOrderId();
+        
         if (processedDecisions.contains(orderId)) {
             log.warn("Duplicate rollback for order: {}", orderId);
             return;
         }
         
-        log.info("Received ROLLBACK decision for order: {}", orderId);
+        log.info("Received ROLLBACK decision for order: {} | Items: {}", 
+                 orderId, event.getItems().size());
         
-        Product product = productRepository.findById(productId).orElse(null);
-        if (product != null) {
-            product.rollback(quantity);
-            productRepository.save(product);
-            processedDecisions.add(orderId);
-            
-            log.info("Stock ROLLED BACK for order: {} | Product: {} | Returned: {} | Available now: {}", 
-                     orderId, productId, quantity, product.getAvailableItems());
+        List<Product> productsToUpdate = new ArrayList<>();
+        
+        for (OrderCreatedEvent.OrderItemEvent item : event.getItems()) {
+            Product product = productRepository.findById(item.getProductId()).orElse(null);
+            if (product != null) {
+                product.rollback(item.getQuantity());
+                productsToUpdate.add(product);
+                
+                log.info("Rolled back {} units of product {} | Available now: {}", 
+                         item.getQuantity(), item.getProductId(), product.getAvailableItems());
+            }
         }
+        
+        productRepository.saveAll(productsToUpdate);
+        productRepository.flush();
+        processedDecisions.add(orderId);
+        
+        log.info("Stock ROLLED BACK for order: {} | All {} items returned to inventory", 
+                 orderId, event.getItems().size());
     }
     
-    private StockProcessedEvent buildLastResponse(String orderId) {
-        // Return cached response (implementation detail - simplified)
+    private StockProcessedEvent buildDefaultResponse(String orderId) {
         return StockProcessedEvent.builder()
             .orderId(orderId)
             .status(StockStatus.ACCEPT)
+            .items(Collections.emptyList())
             .build();
     }
 }
@@ -444,54 +585,94 @@ public class OrderEventConsumer {
     private static final String STOCK_EVENTS_TOPIC = "stock-events";
     
     /**
-     * Consumer 1: Listen for new orders (reserve stock).
+     * Consumer 1: Listen for new orders (reserve stock for ALL items).
+     * 
+     * ATOMIC RESERVATION:
+     * - Passes entire event to service layer
+     * - Service handles atomic reservation (all or nothing)
      */
     @KafkaListener(topics = "order-events", groupId = "stock-service-group")
     public void consumeOrderEvent(@Payload OrderCreatedEvent event,
                                   @Header(KafkaHeaders.RECEIVED_KEY) String key) {
         
-        log.info("Received OrderCreatedEvent: orderId={}, productId={}, quantity={}", 
-                 event.getOrderId(), event.getItems().get(0).getProductId(), 
-                 event.getItems().get(0).getQuantity());
+        log.info("Received OrderCreatedEvent: orderId={}, customerId={}, items={}", 
+                 event.getOrderId(), event.getCustomerId(), event.getItems().size());
         
-        // Process only first item for simplicity (Phase 5 scope)
-        var item = event.getItems().get(0);
+        // Log all items for visibility
+        event.getItems().forEach(item -> 
+            log.info("  - Product: {} | Quantity: {} | Price: {}", 
+                     item.getProductId(), item.getQuantity(), item.getPrice()));
         
-        StockProcessedEvent stockEvent = stockService.processOrderStock(
-            event.getOrderId(),
-            item.getProductId(),
-            item.getQuantity()
-        );
+        // Process ALL items atomically
+        StockProcessedEvent stockEvent = stockService.processOrderStock(event);
         
         // Publish stock response
         kafkaTemplate.send(STOCK_EVENTS_TOPIC, event.getOrderId(), stockEvent);
-        log.info("Published StockProcessedEvent: orderId={}, status={}", 
-                 event.getOrderId(), stockEvent.getStatus());
+        log.info("Published StockProcessedEvent: orderId={}, status={}, items={}", 
+                 event.getOrderId(), stockEvent.getStatus(), stockEvent.getItems().size());
     }
     
     /**
-     * Consumer 2: Listen for final decisions (confirm/rollback).
+     * Consumer 2: Listen for final decisions (confirm/rollback ALL items).
+     * 
+     * COMPENSATION HANDLING:
+     * - CONFIRMED: Deduct all reserved items permanently
+     * - ROLLBACK: Return all reserved items to available pool
+     * - REJECTED: No-op (nothing was reserved)
      */
     @KafkaListener(topics = "order-events", groupId = "stock-decision-group")
     public void consumeDecisionEvent(@Payload FinalDecisionEvent event,
                                      @Header(KafkaHeaders.RECEIVED_KEY) String key) {
         
-        log.info("Received FinalDecisionEvent: orderId={}, status={}", 
-                 event.getOrderId(), event.getStatus());
+        log.info("Received FinalDecisionEvent: orderId={}, status={}, items={}", 
+                 event.getOrderId(), event.getStatus(), event.getItems().size());
+        
+        // Convert FinalDecisionEvent back to OrderCreatedEvent structure for processing
+        // (Both have same fields: orderId, customerId, items)
+        OrderCreatedEvent orderEvent = convertToOrderCreatedEvent(event);
         
         if (event.getStatus() == CONFIRMED) {
-            stockService.handleConfirm(
-                event.getOrderId(),
-                event.getItems().get(0).getProductId(),
-                event.getItems().get(0).getQuantity()
-            );
-        } else if (event.getStatus() == REJECTED || event.getStatus() == ROLLBACK) {
-            stockService.handleRollback(
-                event.getOrderId(),
-                event.getItems().get(0).getProductId(),
-                event.getItems().get(0).getQuantity()
-            );
+            stockService.handleConfirm(orderEvent);
+        } else if (event.getStatus() == ROLLBACK) {
+            // Only rollback if stock was the successful service
+            // (payment failed, so we need to return reserved stock)
+            if (!"STOCK".equals(event.getSource())) {
+                log.info("ROLLBACK triggered by payment failure - returning stock to inventory");
+                stockService.handleRollback(orderEvent);
+            } else {
+                log.info("ROLLBACK triggered by stock failure - no compensation needed");
+            }
+        } else if (event.getStatus() == REJECTED) {
+            // Both services rejected - nothing to rollback
+            log.info("Order REJECTED - no stock compensation needed");
         }
+    }
+    
+    /**
+     * Helper to convert FinalDecisionEvent to OrderCreatedEvent structure.
+     * Both events have the same core fields (orderId, customerId, items).
+     */
+    private OrderCreatedEvent convertToOrderCreatedEvent(FinalDecisionEvent event) {
+        OrderCreatedEvent orderEvent = new OrderCreatedEvent();
+        orderEvent.setOrderId(event.getOrderId());
+        orderEvent.setCustomerId(event.getCustomerId());
+        
+        // Convert item DTOs
+        List<OrderCreatedEvent.OrderItemEvent> items = event.getItems().stream()
+            .map(item -> new OrderCreatedEvent.OrderItemEvent(
+                item.getProductId(),
+                item.getProductName(),
+                item.getQuantity(),
+                item.getPrice()
+            ))
+            .collect(java.util.stream.Collectors.toList());
+        
+        orderEvent.setItems(items);
+        orderEvent.setTotalAmount(event.getItems().stream()
+            .map(item -> item.getPrice().multiply(java.math.BigDecimal.valueOf(item.getQuantity())))
+            .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add));
+        
+        return orderEvent;
     }
 }
 ```
@@ -735,6 +916,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import java.util.List;
 
 @Data
 @NoArgsConstructor
@@ -742,14 +924,25 @@ import lombok.NoArgsConstructor;
 @Builder
 public class StockProcessedEvent {
     private String orderId;
-    private String productId;
-    private int quantity;
+    private String customerId;
+    private List<StockItemResult> items;  // Results for ALL items
     private StockStatus status;
     private String reason;
     
     public enum StockStatus {
-        ACCEPT,
-        REJECT
+        ACCEPT,   // All items available
+        REJECT    // At least one item unavailable
+    }
+    
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Builder
+    public static class StockItemResult {
+        private String productId;
+        private String productName;
+        private int quantity;
+        private boolean available;
     }
 }
 ```
@@ -855,6 +1048,11 @@ public class OrderStreamsTopology {
      * │ ACCEPT  │ REJECT │ ROLLBACK (payment) │
      * │ REJECT  │ ACCEPT │ ROLLBACK (stock)   │
      * └─────────┴────────┴──────────────┘
+     * 
+     * MULTI-ITEM HANDLING:
+     * - Both events contain results for ALL items in the order
+     * - Decision is made at ORDER level (not per-item)
+     * - If ANY item fails, entire order fails
      */
     private FinalDecisionEvent makeDecision(PaymentProcessedEvent payment, 
                                            StockProcessedEvent stock) {
@@ -862,15 +1060,23 @@ public class OrderStreamsTopology {
         boolean paymentAccepted = payment.getStatus() == PaymentStatus.ACCEPT;
         boolean stockAccepted = stock.getStatus() == StockStatus.ACCEPT;
         
-        log.info("Making decision for order {}: payment={}, stock={}", 
-                 payment.getOrderId(), payment.getStatus(), stock.getStatus());
+        log.info("Making decision for order {}: payment={}, stock={} | Items: {}", 
+                 payment.getOrderId(), payment.getStatus(), stock.getStatus(),
+                 payment.getItems().size());
+        
+        // Log detailed item status for debugging
+        log.debug("Payment details: customerId={}, totalCharged={}", 
+                  payment.getCustomerId(), payment.getAmountCharged());
+        log.debug("Stock details: {} items processed", stock.getItems().size());
         
         // Case 1: Both accepted → CONFIRMED
         if (paymentAccepted && stockAccepted) {
+            log.info("Order {} CONFIRMED: payment OK, stock OK", payment.getOrderId());
+            
             return FinalDecisionEvent.builder()
                 .orderId(payment.getOrderId())
                 .customerId(payment.getCustomerId())
-                .items(payment.getItems())
+                .items(payment.getItems())  // Use items from payment event
                 .status(DecisionStatus.CONFIRMED)
                 .source(null)  // No source needed for success
                 .build();
@@ -878,20 +1084,30 @@ public class OrderStreamsTopology {
         
         // Case 2: Both rejected → REJECTED (nothing to rollback)
         if (!paymentAccepted && !stockAccepted) {
+            log.warn("Order {} REJECTED: both payment and stock failed", payment.getOrderId());
+            
+            String combinedReason = String.format("Payment: %s; Stock: %s", 
+                                                  payment.getReason(), stock.getReason());
+            
             return FinalDecisionEvent.builder()
                 .orderId(payment.getOrderId())
                 .customerId(payment.getCustomerId())
                 .items(payment.getItems())
                 .status(DecisionStatus.REJECTED)
-                .reason("Payment: " + payment.getReason() + ", Stock: " + stock.getReason())
+                .reason(combinedReason)
                 .source(null)
                 .build();
         }
         
         // Case 3 & 4: One accepted, one rejected → ROLLBACK
-        // Track which service caused the failure
+        // Track which service caused the failure (needs compensation)
         String failureSource = !paymentAccepted ? "PAYMENT" : "STOCK";
         String reason = !paymentAccepted ? payment.getReason() : stock.getReason();
+        String successfulService = !paymentAccepted ? "stock" : "payment";
+        
+        log.warn("Order {} ROLLBACK: {} failed, {} succeeded - compensating {}", 
+                 payment.getOrderId(), failureSource.toLowerCase(), 
+                 successfulService, successfulService);
         
         return FinalDecisionEvent.builder()
             .orderId(payment.getOrderId())
@@ -961,7 +1177,7 @@ public enum OrderStatus {
 
 ### 2.9 Update payment-service DecisionEventConsumer
 
-Handle new ROLLBACK status:
+Handle new ROLLBACK status with proper multi-item support:
 
 **File:** `payment-service/src/main/java/com/example/paymentservice/consumer/DecisionEventConsumer.java`
 
@@ -969,32 +1185,88 @@ Handle new ROLLBACK status:
 @KafkaListener(topics = "order-events", groupId = "payment-decision-group")
 public void consumeDecisionEvent(@Payload FinalDecisionEvent event) {
     
-    log.info("Received FinalDecisionEvent: orderId={}, status={}, source={}", 
-             event.getOrderId(), event.getStatus(), event.getSource());
+    log.info("Received FinalDecisionEvent: orderId={}, status={}, source={}, items={}", 
+             event.getOrderId(), event.getStatus(), event.getSource(), event.getItems().size());
     
     if (event.getStatus() == CONFIRMED) {
+        // Payment was successful, stock was successful → Commit payment
+        log.info("Order CONFIRMED - committing payment for {} items", event.getItems().size());
         paymentService.handleConfirm(event);
         
     } else if (event.getStatus() == ROLLBACK) {
+        // One service succeeded, one failed → Compensate the successful service
         // NEW: Only rollback if payment was the one that succeeded
         // (stock failed, so we need to compensate payment)
         if ("STOCK".equals(event.getSource())) {
-            log.info("ROLLBACK triggered by stock failure - compensating payment");
+            log.info("ROLLBACK triggered by stock failure - compensating payment for {} items", 
+                     event.getItems().size());
             paymentService.handleRollback(event);
         } else {
-            log.info("ROLLBACK triggered by payment failure - no compensation needed");
+            log.info("ROLLBACK triggered by payment failure - no compensation needed " +
+                     "(payment never succeeded)");
         }
         
     } else if (event.getStatus() == REJECTED) {
         // Both failed - nothing to rollback
-        log.info("Order REJECTED - no compensation needed");
+        log.info("Order REJECTED - no payment compensation needed (both services failed)");
+    }
+}
+```
+
+**Note:** Ensure `paymentService.handleConfirm()` and `handleRollback()` work with the total amount:
+
+```java
+// In PaymentService.java
+@Transactional
+public void handleConfirm(FinalDecisionEvent event) {
+    if (processedDecisions.contains(event.getOrderId())) {
+        log.warn("Duplicate confirm for order: {}", event.getOrderId());
+        return;
+    }
+    
+    // Calculate total from all items
+    BigDecimal totalAmount = event.getItems().stream()
+        .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
+        .reduce(BigDecimal.ZERO, BigDecimal::add);
+    
+    Customer customer = customerRepository.findById(event.getCustomerId()).orElse(null);
+    if (customer != null) {
+        customer.confirm(totalAmount);  // Move from reserved to deducted
+        customerRepository.save(customer);
+        processedDecisions.add(event.getOrderId());
+        
+        log.info("Payment CONFIRMED for order: {} | Total: {} | Items: {}", 
+                 event.getOrderId(), totalAmount, event.getItems().size());
+    }
+}
+
+@Transactional
+public void handleRollback(FinalDecisionEvent event) {
+    if (processedDecisions.contains(event.getOrderId())) {
+        log.warn("Duplicate rollback for order: {}", event.getOrderId());
+        return;
+    }
+    
+    // Calculate total from all items
+    BigDecimal totalAmount = event.getItems().stream()
+        .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
+        .reduce(BigDecimal.ZERO, BigDecimal::add);
+    
+    Customer customer = customerRepository.findById(event.getCustomerId()).orElse(null);
+    if (customer != null) {
+        customer.rollback(totalAmount);  // Return from reserved to available
+        customerRepository.save(customer);
+        processedDecisions.add(event.getOrderId());
+        
+        log.info("Payment ROLLED BACK for order: {} | Total: {} | Items: {}", 
+                 event.getOrderId(), totalAmount, event.getItems().size());
     }
 }
 ```
 
 ### 2.10 Update stock-service DecisionEventConsumer
 
-Same pattern for stock service.
+Already covered in Section 1.7 (OrderEventConsumer handles both OrderCreatedEvent and FinalDecisionEvent with proper multi-item support).
 
 ---
 
@@ -1120,7 +1392,7 @@ public class OrderStateController {
 
 ## Part 4: Testing (Days 11-12)
 
-### 4.1 Test Scenario 1: Both Accept → CONFIRMED
+### 4.1 Test Scenario 1: Both Accept → CONFIRMED (Multi-Item Order)
 
 ```bash
 # Start all services
@@ -1129,104 +1401,284 @@ cd payment-service && mvn spring-boot:run &
 cd stock-service && mvn spring-boot:run &
 cd order-service && mvn spring-boot:run &
 
-# Create order
+# Create multi-item order (all items available, customer has balance)
 curl -X POST http://localhost:8081/api/orders \
   -H "Content-Type: application/json" \
   -d '{
     "customerId": "CUST-1",
-    "items": [{
-      "productId": "PROD-001",
-      "productName": "Laptop",
-      "quantity": 1,
-      "price": 999.99
-    }]
+    "items": [
+      {
+        "productId": "PROD-001",
+        "productName": "Laptop",
+        "quantity": 1,
+        "price": 999.99
+      },
+      {
+        "productId": "PROD-002",
+        "productName": "Mouse",
+        "quantity": 2,
+        "price": 29.99
+      },
+      {
+        "productId": "PROD-003",
+        "productName": "Keyboard",
+        "quantity": 1,
+        "price": 79.99
+      }
+    ]
   }'
 
 # Expected flow:
-# 1. order-service publishes OrderCreatedEvent
-# 2. payment-service: Payment ACCEPT
-# 3. stock-service: Stock ACCEPT
-# 4. Kafka Streams joins both: CONFIRMED
-# 5. payment-service: Confirm payment
-# 6. stock-service: Confirm stock
+# 1. order-service publishes OrderCreatedEvent (3 items, total: $1,139.96)
+# 2. payment-service: Reserves $1,139.96 from CUST-1 → ACCEPT
+# 3. stock-service: Reserves 1 laptop + 2 mice + 1 keyboard → ACCEPT (all available)
+# 4. Kafka Streams joins both within 10s: CONFIRMED
+# 5. payment-service: Confirms payment (moves $1,139.96 from reserved to deducted)
+# 6. stock-service: Confirms stock (moves items from reserved to sold)
+
+# Verify in payment-service logs:
+# "Payment RESERVED for order: ... | Total: $1139.96"
+# "Payment CONFIRMED for order: ... | Total: $1139.96 | Items: 3"
+
+# Verify in stock-service logs:
+# "Stock RESERVED for order: ... | All 3 items available"
+# "Stock CONFIRMED for order: ... | All 3 items deducted"
+
+# Verify in H2 databases:
+# payment-service: CUST-1 balance reduced by $1,139.96
+# stock-service: PROD-001 (49 left), PROD-002 (198 left), PROD-003 (149 left)
 ```
 
-### 4.2 Test Scenario 2: Stock Reject → ROLLBACK Payment
+### 4.2 Test Scenario 2: Stock Reject → ROLLBACK Payment (Partial Stock Failure)
 
 ```bash
-# Create order with high quantity (insufficient stock)
+# Create order where ONE item is out of stock (tests atomic reservation)
 curl -X POST http://localhost:8081/api/orders \
   -H "Content-Type: application/json" \
   -d '{
     "customerId": "CUST-1",
-    "items": [{
-      "productId": "PROD-001",
-      "productName": "Laptop",
-      "quantity": 100,
-      "price": 999.99
-    }]
+    "items": [
+      {
+        "productId": "PROD-001",
+        "productName": "Laptop",
+        "quantity": 5,
+        "price": 999.99
+      },
+      {
+        "productId": "PROD-002",
+        "productName": "Mouse",
+        "quantity": 300,
+        "price": 29.99
+      }
+    ]
   }'
 
 # Expected flow:
-# 1. payment-service: Payment ACCEPT (reserved $99,999)
-# 2. stock-service: Stock REJECT (only 50 available)
+# 1. payment-service: Reserves $13,996.95 from CUST-1 → ACCEPT
+# 2. stock-service: 
+#    - Tries to reserve 5 laptops → SUCCESS (50 available)
+#    - Tries to reserve 300 mice → FAIL (only 200 available)
+#    - Atomic rollback: Returns 5 laptops to inventory
+#    - Overall result → REJECT
 # 3. Kafka Streams: ROLLBACK with source=STOCK
-# 4. payment-service: Rollback (return $99,999 to customer)
-# 5. stock-service: No action (nothing to rollback)
+# 4. payment-service: Rollback (return $13,996.95 to CUST-1)
+# 5. stock-service: No action (atomic rollback already happened)
+
+# Verify in payment-service logs:
+# "Payment RESERVED for order: ... | Total: $13996.95"
+# "ROLLBACK triggered by stock failure - compensating payment"
+# "Payment ROLLED BACK for order: ... | Total: $13996.95"
+
+# Verify in stock-service logs:
+# "Reserved 5 units of product PROD-001"
+# "Insufficient stock for product: PROD-002 | Available: 200 | Required: 300"
+# "Rolled back 5 units of product PROD-001"  ← Atomic rollback
+# "Stock REJECTED for order: ... | Reason: Product PROD-002 insufficient..."
+
+# Verify in H2 databases:
+# payment-service: CUST-1 balance unchanged (reservation was rolled back)
+# stock-service: All products back to original quantities
 ```
 
-### 4.3 Test Scenario 3: Payment Reject → ROLLBACK Stock
+### 4.3 Test Scenario 3: Payment Reject → ROLLBACK Stock (Insufficient Balance)
 
 ```bash
-# Create order with insufficient balance
+# Create expensive multi-item order (customer doesn't have enough balance)
 curl -X POST http://localhost:8081/api/orders \
   -H "Content-Type: application/json" \
   -d '{
     "customerId": "CUST-1",
-    "items": [{
-      "productId": "PROD-010",
-      "productName": "Chair",
-      "quantity": 50,
-      "price": 399.99
-    }]
+    "items": [
+      {
+        "productId": "PROD-010",
+        "productName": "Chair",
+        "quantity": 15,
+        "price": 399.99
+      },
+      {
+        "productId": "PROD-004",
+        "productName": "Monitor",
+        "quantity": 10,
+        "price": 299.99
+      }
+    ]
   }'
 
 # Expected flow:
-# 1. payment-service: Payment REJECT (insufficient balance)
-# 2. stock-service: Stock ACCEPT (reserved 50 chairs)
+# 1. payment-service: Tries to reserve $8,999.75 from CUST-1
+#    - CUST-1 only has $10,000 available
+#    - But $1,139.96 might be reserved from previous test
+#    - Insufficient balance → REJECT
+# 2. stock-service: Reserves 15 chairs + 10 monitors → ACCEPT (all available)
 # 3. Kafka Streams: ROLLBACK with source=PAYMENT
-# 4. payment-service: No action (nothing to rollback)
-# 5. stock-service: Rollback (return 50 chairs to inventory)
+# 4. payment-service: No action (nothing to rollback - reservation never succeeded)
+# 5. stock-service: Rollback (return 15 chairs + 10 monitors to inventory)
+
+# Verify in payment-service logs:
+# "Payment REJECTED for order: ... | Insufficient balance"
+
+# Verify in stock-service logs:
+# "Stock RESERVED for order: ... | All 2 items available"
+# "ROLLBACK triggered by payment failure - returning stock to inventory"
+# "Stock ROLLED BACK for order: ... | All 2 items returned to inventory"
+# "Rolled back 15 units of product PROD-010 | Available now: 20"
+# "Rolled back 10 units of product PROD-004 | Available now: 30"
+
+# Verify in H2 databases:
+# payment-service: CUST-1 balance unchanged (reservation failed)
+# stock-service: All products back to original quantities
+
+# Alternative test with fresh customer (balance known):
+curl -X POST http://localhost:8081/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "CUST-2",
+    "items": [
+      {
+        "productId": "PROD-001",
+        "productName": "Laptop",
+        "quantity": 20,
+        "price": 999.99
+      }
+    ]
+  }'
+# Total: $19,999.80 (exceeds CUST-2 balance of ~$10,000)
 ```
 
-### 4.4 Verify State Store
+### 4.4 Test Scenario 4: Both Reject → REJECTED (No Compensation)
+
+```bash
+# Create order where both payment AND stock fail
+curl -X POST http://localhost:8081/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "CUST-1",
+    "items": [
+      {
+        "productId": "PROD-001",
+        "productName": "Laptop",
+        "quantity": 100,
+        "price": 999.99
+      },
+      {
+        "productId": "PROD-002",
+        "productName": "Mouse",
+        "quantity": 500,
+        "price": 29.99
+      }
+    ]
+  }'
+
+# Expected flow:
+# 1. payment-service: Tries to reserve $114,994.00
+#    - CUST-1 doesn't have this much → REJECT
+# 2. stock-service: Tries to reserve 100 laptops + 500 mice
+#    - Only 50 laptops available → REJECT (atomic rollback)
+# 3. Kafka Streams: Both failed → REJECTED (no compensation needed)
+# 4. payment-service: No action (nothing to rollback)
+# 5. stock-service: No action (atomic rollback already happened)
+
+# Verify in logs:
+# order-service: "Order <id> REJECTED: both payment and stock failed"
+# payment-service: "Payment REJECTED for order: ..."
+# stock-service: "Stock REJECTED for order: ..."
+# Neither service receives compensation request
+
+# Verify in H2 databases:
+# All balances and stock quantities unchanged
+```
+
+### 4.5 Verify State Store
 
 ```bash
 # Query Kafka Streams state store
 curl http://localhost:8081/api/order-state/{orderId}
 
 # Expected: FinalDecisionEvent with status + source
+# Example response:
+{
+  "orderId": "abc-123",
+  "customerId": "CUST-1",
+  "items": [...],
+  "status": "ROLLBACK",
+  "reason": "Product PROD-002 insufficient (available: 200, required: 300)",
+  "source": "STOCK"
+}
 ```
 
-### 4.5 Verify Join Window
+### 4.6 Verify Join Window (Advanced Test)
 
 Test that events arriving >10 seconds apart don't join:
 
 ```bash
-# Stop stock-service
+# Stop stock-service (simulate slow service)
 kill $(pgrep -f stock-service)
 
 # Create order (only payment will respond)
-curl -X POST http://localhost:8081/api/orders ...
+curl -X POST http://localhost:8081/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customerId": "CUST-3",
+    "items": [{
+      "productId": "PROD-005",
+      "productName": "Headphones",
+      "quantity": 1,
+      "price": 149.99
+    }]
+  }'
 
-# Wait 15 seconds
+# Wait 15 seconds (beyond 10-second join window)
 sleep 15
 
 # Start stock-service (will publish stock event now)
 cd stock-service && mvn spring-boot:run &
 
-# Expected: No join (window expired)
-# Check order-service logs: No "Final decision" message
+# Expected behavior:
+# - payment-service publishes PaymentProcessedEvent immediately
+# - Kafka Streams buffers payment event, waiting for stock event
+# - After 10 seconds: join window expires, payment event dropped
+# - stock-service starts and publishes StockProcessedEvent (too late)
+# - No join occurs, no FinalDecisionEvent published
+# - Order stays in PENDING state
+
+# Verify in order-service logs:
+# - "Received payment event: orderId=... status=ACCEPT"
+# - No "Final decision for order ..." message (join failed)
+
+# Verify in Kafka UI:
+# - payment-events topic: PaymentProcessedEvent present
+# - stock-events topic: StockProcessedEvent present
+# - order-events topic: No FinalDecisionEvent (join didn't happen)
+
+# Check order state:
+curl http://localhost:8081/api/orders/{orderId}
+# Status should be PENDING (never got confirmed/rejected)
+
+# Real-world implication:
+# - Order is "stuck" in PENDING state
+# - Payment reserved but never confirmed/rolled back
+# - Stock reserved (if stock responded) but never confirmed/rolled back
+# - Requires monitoring and manual intervention (DLQ topic in production)
 ```
 
 ---
