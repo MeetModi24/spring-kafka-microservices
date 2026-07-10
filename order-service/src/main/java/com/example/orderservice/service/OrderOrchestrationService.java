@@ -2,6 +2,7 @@ package com.example.orderservice.service;
 
 import com.example.orderservice.event.FinalDecisionEvent;
 import com.example.orderservice.event.PaymentProcessedEvent;
+import com.example.orderservice.event.StockProcessedEvent;
 import com.example.orderservice.model.Order;
 import com.example.orderservice.model.OrderStatus;
 import lombok.RequiredArgsConstructor;
@@ -10,6 +11,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -41,50 +43,30 @@ public class OrderOrchestrationService {
     private final Set<String> processedDecisions = ConcurrentHashMap.newKeySet();
 
     /**
+     * Track payment and stock responses for 3-service orchestration
+     * Map<orderId, Map<"payment"|"stock", response>>
+     */
+    private final Map<String, Map<String, Object>> orchestrationState = new ConcurrentHashMap<>();
+
+    /**
      * Handle payment response and make final SAGA decision
      *
-     * DECISION LOGIC (2-service pattern):
-     * - Payment ACCEPT - Order CONFIRMED
-     * - Payment REJECT - Order REJECTED
-     *
-     * Note: Phase 5 (3-service) will use:
-     * - Both ACCEPT - CONFIRMED
-     * - Both REJECT - REJECTED
-     * - One ACCEPT, one REJECT - ROLLBACK
+     * DECISION LOGIC (3-service pattern):
+     * - Store payment response and wait for stock response
+     * - Both ACCEPT - Order CONFIRMED
+     * - Either REJECT - Order REJECTED
      */
     public void handlePaymentResponse(PaymentProcessedEvent paymentEvent) {
         String orderId = paymentEvent.getOrderId();
 
-        log.info("Orchestrating decision for order: {}", orderId);
+        log.info("Received payment result for order: {}, status: {}", orderId, paymentEvent.getStatus());
 
-        // Idempotency check
-        if (processedDecisions.contains(orderId)) {
-            log.warn("Order {} already processed, skipping", orderId);
-            return;
-        }
+        // Store payment response in orchestration state
+        orchestrationState.computeIfAbsent(orderId, k -> new ConcurrentHashMap<>())
+            .put("payment", paymentEvent);
 
-        // Get order from EXISTING OrderService.orderStore
-        Order order = orderService.getOrderById(orderId);
-
-        // Make final decision based on payment status
-        FinalDecisionEvent decision;
-        if (paymentEvent.getStatus() == PaymentProcessedEvent.PaymentStatus.ACCEPT) {
-            order.setStatus(OrderStatus.CONFIRMED);
-            decision = buildDecision(order, FinalDecisionEvent.DecisionStatus.CONFIRMED, null);
-            log.info("Payment ACCEPTED - Order CONFIRMED: {}", orderId);
-        } else {
-            order.setStatus(OrderStatus.REJECTED);
-            decision = buildDecision(order, FinalDecisionEvent.DecisionStatus.REJECTED, paymentEvent.getReason());
-            log.info("Payment REJECTED - Order REJECTED: {} | Reason: {}", orderId, paymentEvent.getReason());
-        }
-
-        // Mark as processed
-        processedDecisions.add(orderId);
-
-        // Publish final decision to order-events topic
-        publishDecision(decision);
-
-        log.info("Orchestration complete: orderId={}, status={}", orderId, order.getStatus());
+        // Try to make final decision if both responses are available
+        evaluateOrchestration(orderId);
     }
 
     private FinalDecisionEvent buildDecision(Order order, FinalDecisionEvent.DecisionStatus status, String reason) {
@@ -96,6 +78,86 @@ public class OrderOrchestrationService {
             .reason(reason)
             .decidedAt(LocalDateTime.now())
             .build();
+    }
+
+    /**
+     * Handle stock response from stock-service (3-service orchestration)
+     * Stores the stock response and evaluates if both payment and stock responses are received.
+     */
+    public void handleStockResult(StockProcessedEvent stockEvent) {
+        String orderId = stockEvent.getOrderId();
+
+        log.info("Received stock result for order: {}, status: {}", orderId, stockEvent.getStatus());
+
+        // Store stock response in orchestration state
+        orchestrationState.computeIfAbsent(orderId, k -> new ConcurrentHashMap<>())
+            .put("stock", stockEvent);
+
+        // Try to make final decision if both responses are available
+        evaluateOrchestration(orderId);
+    }
+
+    /**
+     * Evaluate final decision when both payment and stock responses are available.
+     *
+     * Decision Logic:
+     * - Both ACCEPT -> CONFIRMED
+     * - Either REJECT -> REJECTED (compensate the accepted service)
+     */
+    private void evaluateOrchestration(String orderId) {
+        Map<String, Object> state = orchestrationState.get(orderId);
+        if (state == null) {
+            return;
+        }
+
+        PaymentProcessedEvent paymentEvent = (PaymentProcessedEvent) state.get("payment");
+        StockProcessedEvent stockEvent = (StockProcessedEvent) state.get("stock");
+
+        // Wait until both responses are received
+        if (paymentEvent == null || stockEvent == null) {
+            log.info("Waiting for all responses for order: {} (payment: {}, stock: {})",
+                orderId, paymentEvent != null, stockEvent != null);
+            return;
+        }
+
+        // Idempotency check
+        if (processedDecisions.contains(orderId)) {
+            log.warn("Order {} already processed, skipping", orderId);
+            return;
+        }
+
+        // Get order
+        Order order = orderService.getOrderById(orderId);
+
+        // Make final decision
+        FinalDecisionEvent decision;
+        boolean paymentAccepted = paymentEvent.getStatus() == PaymentProcessedEvent.PaymentStatus.ACCEPT;
+        boolean stockAccepted = stockEvent.getStatus() == StockProcessedEvent.StockStatus.ACCEPT;
+
+        if (paymentAccepted && stockAccepted) {
+            // Both accepted - confirm order
+            order.setStatus(OrderStatus.CONFIRMED);
+            decision = buildDecision(order, FinalDecisionEvent.DecisionStatus.CONFIRMED, null);
+            log.info("Both services ACCEPTED - Order CONFIRMED: {}", orderId);
+        } else {
+            // At least one rejected - reject order
+            order.setStatus(OrderStatus.REJECTED);
+            String reason = !paymentAccepted ? paymentEvent.getReason() : stockEvent.getReason();
+            decision = buildDecision(order, FinalDecisionEvent.DecisionStatus.REJECTED, reason);
+            log.info("At least one service REJECTED - Order REJECTED: {} | Reason: {}", orderId, reason);
+
+            // TODO: Trigger compensating transactions if needed
+            // e.g., if payment accepted but stock rejected, refund payment
+        }
+
+        // Mark as processed and clean up state
+        processedDecisions.add(orderId);
+        orchestrationState.remove(orderId);
+
+        // Publish final decision
+        publishDecision(decision);
+
+        log.info("3-service orchestration complete: orderId={}, status={}", orderId, order.getStatus());
     }
 
     private void publishDecision(FinalDecisionEvent decision) {

@@ -1,0 +1,16 @@
+# Maven build output
+**/target/
+**/logs/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Process tracking
+.service-pids
+
+# Temporary files
+*.log
+*.tmp

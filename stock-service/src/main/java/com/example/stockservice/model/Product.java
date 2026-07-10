@@ -19,11 +19,11 @@ public class Product {
     private String productId;
     
     private String productName;
-    
-    private Integer availableItems;  // Available for new orders
-    
-    private Integer reservedItems;   // Reserved for pending orders
-    
+
+    private int availableItems;  // Available for new orders
+
+    private int reservedItems;   // Reserved for pending orders
+
     private BigDecimal price;
     
     /**

@@ -1,11 +1,16 @@
-package com.example.stockservice.event;
+package com.example.orderservice.event;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+
 import java.util.List;
 
+/**
+ * Event published by stock-service after processing stock reservation.
+ * Consumed by order-service orchestrator.
+ */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor

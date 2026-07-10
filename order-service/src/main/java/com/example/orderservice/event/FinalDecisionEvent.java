@@ -51,6 +51,12 @@ public class FinalDecisionEvent {
     private String reason;
 
     /**
+     * Source of failure - "PAYMENT" or "STOCK" (Phase 5 only)
+     * Used for ROLLBACK decisions to identify which service failed
+     */
+    private String source;
+
+    /**
      * Timestamp when decision was made
      */
     private LocalDateTime decidedAt;
@@ -59,7 +65,8 @@ public class FinalDecisionEvent {
      * Decision status enum
      *
      * CONFIRMED: All participants accepted - commit transaction
-     * REJECTED: At least one participant rejected - compensate/rollback
+     * REJECTED: All participants rejected - nothing to compensate
+     * ROLLBACK: Partial success - compensate the successful participant (Phase 5)
      */
     public enum DecisionStatus {
         /**
@@ -68,8 +75,15 @@ public class FinalDecisionEvent {
         CONFIRMED,
 
         /**
-         * Order rejected by orchestrator - rollback the reservation
+         * Order rejected by orchestrator - both services failed, nothing to compensate
          */
-        REJECTED
+        REJECTED,
+
+        /**
+         * Partial success - one service succeeded, one failed
+         * The successful service must rollback (compensate)
+         * The 'source' field identifies which service failed
+         */
+        ROLLBACK
     }
 }

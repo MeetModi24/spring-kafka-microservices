@@ -1,10 +1,7 @@
 package com.example.orderservice.service;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
@@ -15,21 +12,66 @@ import com.example.orderservice.exception.InvalidOrderException;
 import com.example.orderservice.exception.OrderNotFoundException;
 import com.example.orderservice.model.Order;
 import com.example.orderservice.model.OrderItem;
+import com.example.orderservice.repository.OrderRepository;
 
+/**
+ * ORDER SERVICE (Business Logic Layer)
+ * =====================================
+ *
+ * RESPONSIBILITIES:
+ * - Validate business rules
+ * - Coordinate operations across multiple components
+ * - Transform between DTOs and domain models
+ * - Publish domain events
+ *
+ * PATTERN: Service Layer
+ * - Sits between Controller (API) and Repository (Data)
+ * - Contains business logic, not just CRUD operations
+ * - Transaction boundary (when using @Transactional with database)
+ *
+ * DEPENDENCIES:
+ * - OrderRepository: Data access
+ * - OrderEventProducer: Event publishing
+ */
 @Service
 public class OrderService {
-    private final Map<String, Order> orderStore = new ConcurrentHashMap<>();
+    private final OrderRepository orderRepository;
     private final OrderEventProducer eventProducer;
 
     /**
-     * Constructor injection
-     * Spring automatically injects OrderEventProducer bean
+     * Constructor injection (recommended over field injection)
+     * Spring automatically injects required beans
+     *
+     * WHY CONSTRUCTOR INJECTION?
+     * - Makes dependencies explicit
+     * - Enables immutability (final fields)
+     * - Easier to test (can pass mocks in constructor)
+     * - Required dependencies are clear at compile time
      */
-    public OrderService(OrderEventProducer eventProducer) {
+    public OrderService(OrderRepository orderRepository, OrderEventProducer eventProducer) {
+        this.orderRepository = orderRepository;
         this.eventProducer = eventProducer;
     }
 
-    public Order createOrder(CreateOrderRequest request){ // customerId, items
+    /**
+     * Create a new order.
+     *
+     * BUSINESS FLOW:
+     * 1. Validate request and transform to domain model
+     * 2. Validate business rules
+     * 3. Persist to repository
+     * 4. Publish domain event
+     *
+     * DESIGN PATTERN: Command Handler
+     * - Receives command (CreateOrderRequest)
+     * - Validates and executes
+     * - Returns result (Order)
+     *
+     * @param request The create order request DTO
+     * @return Created order
+     * @throws InvalidOrderException if validation fails
+     */
+    public Order createOrder(CreateOrderRequest request) {
         // Map DTO items -> Domain items
         List<OrderItem> orderItems = request.getItems().stream()
             .map(dto -> new OrderItem(
@@ -44,16 +86,17 @@ public class OrderService {
         Order order = new Order(request.getCustomerId(), orderItems);
         order.setOrderId(UUID.randomUUID().toString());
 
+        // Validate business rules
         if (!order.isValid()) {
             throw new InvalidOrderException("Order validation failed: " +
                 "Check that all items have valid productId, quantity > 0, and price > 0");
         }
 
-        // Store order in memory
-        orderStore.put(order.getOrderId(), order);
+        // Persist to repository (replaces direct map access)
+        order = orderRepository.save(order);
 
         // Publish event to Kafka (asynchronous)
-        // This happens AFTER order is stored to ensure consistency
+        // This happens AFTER order is persisted to ensure consistency
         OrderCreatedEvent event = mapToEvent(order);
         eventProducer.publishOrderCreated(event);
 
@@ -89,16 +132,36 @@ public class OrderService {
         );
     }
     
-    public Order getOrderById(String Id){
-        Order order = orderStore.get(Id);
-        if (order == null) {
-            throw new OrderNotFoundException(Id);
-        }
-        return order;
+    /**
+     * Retrieve order by ID.
+     *
+     * PATTERN: Query Handler
+     * - Simple read operation
+     * - Delegates to repository
+     * - Throws exception if not found
+     *
+     * @param orderId The order ID
+     * @return The order
+     * @throws OrderNotFoundException if order doesn't exist
+     */
+    public Order getOrderById(String orderId) {
+        return orderRepository.findById(orderId)
+                .orElseThrow(() -> new OrderNotFoundException(orderId));
     }
 
-    public List<Order> getAllOrders(){
-        return new ArrayList<>(orderStore.values());
+    /**
+     * Get all orders.
+     *
+     * NOTE: In production, this should be paginated to avoid
+     * loading huge datasets into memory.
+     *
+     * Better signature would be:
+     *   Page<Order> getAllOrders(Pageable pageable)
+     *
+     * @return List of all orders
+     */
+    public List<Order> getAllOrders() {
+        return orderRepository.findAll();
     }
 
 }

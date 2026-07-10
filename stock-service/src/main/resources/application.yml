@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: stock-service
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: stock-service-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+        spring.json.type.mapping: >
+          OrderCreatedEvent:com.example.stockservice.event.OrderCreatedEvent,
+          FinalDecisionEvent:com.example.stockservice.event.FinalDecisionEvent
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.type.mapping: >
+          StockProcessedEvent:com.example.stockservice.event.StockProcessedEvent
+
+  datasource:
+    url: jdbc:h2:mem:stockdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+server:
+  port: 8083
+
+logging:
+  level:
+    com.example.stockservice: DEBUG
+    org.springframework.kafka: INFO
