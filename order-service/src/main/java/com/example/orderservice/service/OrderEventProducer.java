@@ -29,7 +29,7 @@ import java.util.concurrent.CompletableFuture;
 public class OrderEventProducer {
 
     private static final Logger log = LoggerFactory.getLogger(OrderEventProducer.class);
-    private static final String TOPIC = "order-events";
+    private static final String TOPIC = "order-created";
 
     private final KafkaTemplate<String, OrderCreatedEvent> kafkaTemplate;
 

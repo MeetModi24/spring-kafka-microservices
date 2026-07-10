@@ -4,10 +4,20 @@ import lombok.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.List;
 
 /**
- * Final decision event sent to all SAGA participants (Phase 5 version with source tracking)
+ * Final decision event sent to all SAGA participants
+ *
+ * PURPOSE:
+ * - Sent by order-service after aggregating all participant responses
+ * - Tells each participant to CONFIRM (commit) or REJECT (compensate)
+ * - Enables SAGA pattern completion phase
+ *
+ * KAFKA PATTERN:
+ * - Published to "order-events" topic
+ * - Different consumer group ("payment-decision-group") processes it
+ * - Kafka delivers to BOTH groups independently
+ * - Each message is processed by 2 different listeners
  */
 @Data
 @NoArgsConstructor
@@ -15,46 +25,65 @@ import java.util.List;
 @Builder
 public class FinalDecisionEvent {
 
+    /**
+     * Order ID this decision applies to
+     */
     private String orderId;
+
+    /**
+     * Customer ID for reference
+     */
     private String customerId;
-    private List<OrderItemDTO> items;  // All order items
+
+    /**
+     * Order amount
+     */
+    private BigDecimal amount;
+
+    /**
+     * Final decision status: CONFIRMED or REJECTED
+     */
     private DecisionStatus status;
+
+    /**
+     * Reason for rejection (if status=REJECTED)
+     */
     private String reason;
-    private String source;  // "PAYMENT" or "STOCK" - tracks which service caused ROLLBACK
+
+    /**
+     * Source of failure - "PAYMENT" or "STOCK" (Phase 5 only)
+     * Used for ROLLBACK decisions to identify which service failed
+     */
+    private String source;
+
+    /**
+     * Timestamp when decision was made
+     */
     private LocalDateTime decidedAt;
 
     /**
      * Decision status enum
+     *
+     * CONFIRMED: All participants accepted - commit transaction
+     * REJECTED: All participants rejected - nothing to compensate
+     * ROLLBACK: Partial success - compensate the successful participant (Phase 5)
      */
     public enum DecisionStatus {
         /**
-         * Order confirmed - commit all reservations
+         * Order confirmed by orchestrator - commit the reservation
          */
         CONFIRMED,
 
         /**
-         * Order rejected - both services failed, nothing to compensate
+         * Order rejected by orchestrator - both services failed, nothing to compensate
          */
         REJECTED,
 
         /**
-         * Partial success - rollback the successful service
-         * source field indicates which service failed
+         * Partial success - one service succeeded, one failed
+         * The successful service must rollback (compensate)
+         * The 'source' field identifies which service failed
          */
         ROLLBACK
-    }
-
-    /**
-     * DTO for order items in decision event
-     */
-    @Data
-    @NoArgsConstructor
-    @AllArgsConstructor
-    @Builder
-    public static class OrderItemDTO {
-        private String productId;
-        private String productName;
-        private int quantity;
-        private BigDecimal price;
     }
 }

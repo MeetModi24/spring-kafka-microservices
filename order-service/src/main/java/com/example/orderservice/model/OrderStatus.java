@@ -51,5 +51,10 @@ public enum OrderStatus {
     /**
      * Order rejected (SAGA decision - payment or stock failed)
      */
-    REJECTED
+    REJECTED,
+
+    /**
+     * Order requires rollback (SAGA decision - partial success, compensation needed)
+     */
+    ROLLBACK
 }

@@ -17,6 +17,7 @@ import org.springframework.kafka.support.serializer.JsonSerde;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.Map;
 
 /**
  * Kafka Streams processor for SAGA orchestration.
@@ -63,10 +64,15 @@ public class OrderStreamProcessor {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.registerModule(new JavaTimeModule());
 
-        // Create Serdes for custom event types
-        JsonSerde<PaymentProcessedEvent> paymentSerde = new JsonSerde<>(PaymentProcessedEvent.class, objectMapper);
-        JsonSerde<StockProcessedEvent> stockSerde = new JsonSerde<>(StockProcessedEvent.class, objectMapper);
-        JsonSerde<FinalDecisionEvent> decisionSerde = new JsonSerde<>(FinalDecisionEvent.class, objectMapper);
+        // Create custom JsonSerdes that trust all packages (to handle Spring type headers)
+        JsonSerde<PaymentProcessedEvent> paymentSerde = new JsonSerde<>(PaymentProcessedEvent.class, objectMapper)
+            .ignoreTypeHeaders();  // Ignore Spring's type headers
+
+        JsonSerde<StockProcessedEvent> stockSerde = new JsonSerde<>(StockProcessedEvent.class, objectMapper)
+            .ignoreTypeHeaders();
+
+        JsonSerde<FinalDecisionEvent> decisionSerde = new JsonSerde<>(FinalDecisionEvent.class, objectMapper)
+            .ignoreTypeHeaders();
 
         // STEP 1: Create KStream for payment-events
         // Key: orderId, Value: PaymentProcessedEvent

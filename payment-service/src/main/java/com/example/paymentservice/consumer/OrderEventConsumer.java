@@ -31,7 +31,7 @@ public class OrderEventConsumer {
      * @param event Deserialized order event
      */
     @KafkaListener(
-        topics = "order-events",
+        topics = "order-created",
         groupId = "payment-service-group",
         containerFactory = "kafkaListenerContainerFactory"
     )

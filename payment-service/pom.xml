@@ -56,7 +56,17 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
 
-        <!-- NO spring-boot-starter-web - This is a Kafka-only service -->
+        <!-- Spring Boot Starter Web - for health endpoint -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Spring Boot Actuator - for health checks -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

@@ -164,4 +164,11 @@ public class OrderService {
         return orderRepository.findAll();
     }
 
+    /**
+     * Update order status based on SAGA decision.
+     */
+    public void updateOrder(Order order) {
+        orderRepository.save(order);
+    }
+
 }

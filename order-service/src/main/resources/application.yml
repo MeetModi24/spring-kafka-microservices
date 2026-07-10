@@ -80,6 +80,7 @@ spring:
         '[spring.json.trusted.packages]': com.example.orderservice.event
         # Security: Only deserialize classes from trusted packages
         # Prevents arbitrary code execution from malicious messages
+        '[spring.json.type.mapping]': finalDecision:com.example.orderservice.event.FinalDecisionEvent
 
     # Kafka Streams configuration (for Phase 5 - Stream Processing)
     streams:

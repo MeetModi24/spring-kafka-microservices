@@ -13,9 +13,6 @@ import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-import java.util.stream.Collectors;
-
 import static com.example.stockservice.event.FinalDecisionEvent.DecisionStatus.*;
 
 @Component
@@ -30,12 +27,8 @@ public class OrderEventConsumer {
 
     /**
      * Consumer 1: Listen for new orders (reserve stock for ALL items).
-     *
-     * ATOMIC RESERVATION:
-     * - Passes entire event to service layer
-     * - Service handles atomic reservation (all or nothing)
      */
-    @KafkaListener(topics = "order-events", groupId = "stock-service-group")
+    @KafkaListener(topics = "order-created", groupId = "stock-service-group")
     public void consumeOrderEvent(@Payload OrderCreatedEvent event,
                                   @Header(KafkaHeaders.RECEIVED_KEY) String key) {
 
@@ -57,32 +50,23 @@ public class OrderEventConsumer {
     }
 
     /**
-     * Consumer 2: Listen for final decisions (confirm/rollback ALL items).
-     *
-     * COMPENSATION HANDLING:
-     * - CONFIRMED: Deduct all reserved items permanently
-     * - ROLLBACK: Return all reserved items to available pool
-     * - REJECTED: No-op (nothing was reserved)
+     * Consumer 2: Listen for final decisions (confirm/rollback).
      */
     @KafkaListener(topics = "order-events", groupId = "stock-decision-group")
     public void consumeDecisionEvent(@Payload FinalDecisionEvent event,
                                      @Header(KafkaHeaders.RECEIVED_KEY) String key) {
 
-        log.info("Received FinalDecisionEvent: orderId={}, status={}, items={}",
-                 event.getOrderId(), event.getStatus(), event.getItems().size());
-
-        // Convert FinalDecisionEvent back to OrderCreatedEvent structure for processing
-        // (Both have same fields: orderId, customerId, items)
-        OrderCreatedEvent orderEvent = convertToOrderCreatedEvent(event);
+        log.info("Received FinalDecisionEvent: orderId={}, status={}, source={}",
+                 event.getOrderId(), event.getStatus(), event.getSource());
 
         if (event.getStatus() == CONFIRMED) {
-            stockService.handleConfirm(orderEvent);
+            stockService.handleConfirm(event.getOrderId());
         } else if (event.getStatus() == ROLLBACK) {
             // Only rollback if stock was the successful service
             // (payment failed, so we need to return reserved stock)
             if (!"STOCK".equals(event.getSource())) {
                 log.info("ROLLBACK triggered by payment failure - returning stock to inventory");
-                stockService.handleRollback(orderEvent);
+                stockService.handleRollback(event.getOrderId());
             } else {
                 log.info("ROLLBACK triggered by stock failure - no compensation needed");
             }
@@ -90,32 +74,5 @@ public class OrderEventConsumer {
             // Both services rejected - nothing to rollback
             log.info("Order REJECTED - no stock compensation needed");
         }
-    }
-
-    /**
-     * Helper to convert FinalDecisionEvent to OrderCreatedEvent structure.
-     * Both events have the same core fields (orderId, customerId, items).
-     */
-    private OrderCreatedEvent convertToOrderCreatedEvent(FinalDecisionEvent event) {
-        OrderCreatedEvent orderEvent = new OrderCreatedEvent();
-        orderEvent.setOrderId(event.getOrderId());
-        orderEvent.setCustomerId(event.getCustomerId());
-
-        // Convert item DTOs
-        List<OrderCreatedEvent.OrderItemEvent> items = event.getItems().stream()
-            .map(item -> new OrderCreatedEvent.OrderItemEvent(
-                item.getProductId(),
-                item.getProductName(),
-                item.getQuantity(),
-                item.getPrice()
-            ))
-            .collect(Collectors.toList());
-
-        orderEvent.setItems(items);
-        orderEvent.setTotalAmount(event.getItems().stream()
-            .map(item -> item.getPrice().multiply(java.math.BigDecimal.valueOf(item.getQuantity())))
-            .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add));
-
-        return orderEvent;
     }
 }

@@ -12,15 +12,15 @@ spring:
       properties:
         spring.json.trusted.packages: "*"
         spring.json.type.mapping: >
-          OrderCreatedEvent:com.example.stockservice.event.OrderCreatedEvent,
-          FinalDecisionEvent:com.example.stockservice.event.FinalDecisionEvent
+          orderCreated:com.example.stockservice.event.OrderCreatedEvent,
+          finalDecision:com.example.stockservice.event.FinalDecisionEvent
 
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
       properties:
         spring.json.type.mapping: >
-          StockProcessedEvent:com.example.stockservice.event.StockProcessedEvent
+          stockProcessed:com.example.stockservice.event.StockProcessedEvent
 
   datasource:
     url: jdbc:h2:mem:stockdb

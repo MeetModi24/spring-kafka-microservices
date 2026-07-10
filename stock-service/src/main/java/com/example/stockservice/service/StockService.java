@@ -28,6 +28,9 @@ public class StockService {
     // Cache last response for idempotency
     private final Map<String, StockProcessedEvent> responseCache = new ConcurrentHashMap<>();
 
+    // Store order items for compensation (confirm/rollback)
+    private final Map<String, OrderCreatedEvent> orderCache = new ConcurrentHashMap<>();
+
     /**
      * Reserve stock for ALL items in an order (Phase 1 of SAGA).
      *
@@ -114,6 +117,7 @@ public class StockService {
             productRepository.saveAll(reservedProducts);
             productRepository.flush();
             processedReservations.add(orderId);
+            orderCache.put(orderId, event);  // Store for later compensation
 
             log.info("Stock RESERVED for order: {} | All {} items available",
                      orderId, event.getItems().size());
@@ -164,11 +168,15 @@ public class StockService {
      * Moves items from reserved to permanently deducted.
      */
     @Transactional
-    public void handleConfirm(OrderCreatedEvent event) {
-        String orderId = event.getOrderId();
-
+    public void handleConfirm(String orderId) {
         if (processedDecisions.contains(orderId)) {
             log.warn("Duplicate confirm for order: {}", orderId);
+            return;
+        }
+
+        OrderCreatedEvent event = orderCache.get(orderId);
+        if (event == null) {
+            log.error("Order {} not found in cache - cannot confirm", orderId);
             return;
         }
 
@@ -201,11 +209,15 @@ public class StockService {
      * Returns items from reserved back to available pool.
      */
     @Transactional
-    public void handleRollback(OrderCreatedEvent event) {
-        String orderId = event.getOrderId();
-
+    public void handleRollback(String orderId) {
         if (processedDecisions.contains(orderId)) {
             log.warn("Duplicate rollback for order: {}", orderId);
+            return;
+        }
+
+        OrderCreatedEvent event = orderCache.get(orderId);
+        if (event == null) {
+            log.error("Order {} not found in cache - cannot rollback", orderId);
             return;
         }
 

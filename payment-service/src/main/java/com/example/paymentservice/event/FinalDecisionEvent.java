@@ -2,22 +2,20 @@ package com.example.paymentservice.event;
 
 import lombok.*;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
- * Final decision event received from order-service via Kafka
- *
- * IMPORTANT: Must match order-service's FinalDecisionEvent structure exactly
- * for JSON deserialization to work
+ * Final decision event sent to all SAGA participants
  *
  * PURPOSE:
  * - Sent by order-service after aggregating all participant responses
- * - Tells each participant to CONFIRM (commit) or ROLLBACK (compensate)
+ * - Tells each participant to CONFIRM (commit) or REJECT (compensate)
  * - Enables SAGA pattern completion phase
  *
  * KAFKA PATTERN:
- * - Same topic as OrderCreatedEvent ("order-events")
- * - Different consumer group ("payment-decision-group")
+ * - Published to "order-events" topic
+ * - Different consumer group ("payment-decision-group") processes it
  * - Kafka delivers to BOTH groups independently
  * - Each message is processed by 2 different listeners
  */
@@ -38,6 +36,11 @@ public class FinalDecisionEvent {
     private String customerId;
 
     /**
+     * Order amount
+     */
+    private BigDecimal amount;
+
+    /**
      * Final decision status: CONFIRMED or REJECTED
      */
     private DecisionStatus status;
@@ -48,6 +51,12 @@ public class FinalDecisionEvent {
     private String reason;
 
     /**
+     * Source of failure - "PAYMENT" or "STOCK" (Phase 5 only)
+     * Used for ROLLBACK decisions to identify which service failed
+     */
+    private String source;
+
+    /**
      * Timestamp when decision was made
      */
     private LocalDateTime decidedAt;
@@ -55,8 +64,9 @@ public class FinalDecisionEvent {
     /**
      * Decision status enum
      *
-     * CONFIRMED: All participants accepted → commit transaction
-     * REJECTED: At least one participant rejected → compensate/rollback
+     * CONFIRMED: All participants accepted - commit transaction
+     * REJECTED: All participants rejected - nothing to compensate
+     * ROLLBACK: Partial success - compensate the successful participant (Phase 5)
      */
     public enum DecisionStatus {
         /**
@@ -65,8 +75,15 @@ public class FinalDecisionEvent {
         CONFIRMED,
 
         /**
-         * Order rejected by orchestrator - rollback the reservation
+         * Order rejected by orchestrator - both services failed, nothing to compensate
          */
-        REJECTED
+        REJECTED,
+
+        /**
+         * Partial success - one service succeeded, one failed
+         * The successful service must rollback (compensate)
+         * The 'source' field identifies which service failed
+         */
+        ROLLBACK
     }
 }
