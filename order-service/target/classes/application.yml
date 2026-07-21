@@ -80,6 +80,34 @@ spring:
         '[spring.json.trusted.packages]': com.example.orderservice.event
         # Security: Only deserialize classes from trusted packages
         # Prevents arbitrary code execution from malicious messages
+        '[spring.json.type.mapping]': finalDecision:com.example.orderservice.event.FinalDecisionEvent
+
+    # Kafka Streams configuration (for Phase 5 - Stream Processing)
+    streams:
+      application-id: order-stream-processor
+      # Unique identifier for this Kafka Streams application
+      # Used for consumer group naming and state store directories
+
+      bootstrap-servers: localhost:9092
+      # Kafka broker address for streams (can be different from producer/consumer)
+
+      properties:
+        # Commit interval - how often to save processing state
+        commit.interval.ms: 1000
+        # Default: 30000 (30s). Lower value = more frequent commits = better recovery
+
+        # Default Serdes (can be overridden per stream)
+        default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+        default.value.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+
+        # State directory for local state stores
+        # Kafka Streams maintains local state for joins, aggregations, etc.
+        state.dir: /tmp/kafka-streams
+
+        # Processing guarantee
+        processing.guarantee: exactly_once_v2
+        # Options: at_least_once, exactly_once_v2
+        # exactly_once_v2 ensures no duplicate processing (requires Kafka 2.5+)
 
 # ===================================
 # LOGGING CONFIGURATION
